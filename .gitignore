@@ -6,3 +6,9 @@ Samples/*
 *.7z
 CSharp/*
 VSeeFace/*
+.venv/
+# 启动脚本生成的运行时文件
+.facetracker_config
+.facetracker.pid
+.facetracker_console.log
+.facetracker_data*.log

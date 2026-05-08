@@ -4,13 +4,39 @@ version = "1.20.4"
 description = ""
 authors = ["emilianavt"]
 license = "BSD-2-Clause"
+packages = [
+    { include = "facetracker.py" },
+    { include = "tracker.py" },
+    { include = "retinaface.py" },
+    { include = "model.py" },
+    { include = "input_reader.py" },
+    { include = "remedian.py" },
+    { include = "similaritytransform.py" },
+    { include = "dshowcapture.py" },
+    { include = "escapi.py" },
+]
 
 [tool.poetry.dependencies]
 python = ">=3.7,<3.11"
-numpy = "^1.21.3"
-opencv-python = "^4.5.4"
-Pillow = "^8.4.0"
-onnxruntime = "^1.9.0"
+numpy = ">=1.21.3"
+opencv-python = ">=4.5.4"
+Pillow = ">=8.4.0"
+onnxruntime = { version = ">=1.9.0", optional = true }
+onnxruntime-gpu = { version = ">=1.23.2", optional = true }
+nvidia-cublas-cu12 = { version = "*", optional = true }
+nvidia-cuda-runtime-cu12 = { version = "*", optional = true }
+nvidia-cufft-cu12 = { version = "*", optional = true }
+
+[tool.poetry.extras]
+# CPU 推理（默认）：安装 onnxruntime
+cpu = ["onnxruntime"]
+# GPU 加速：安装 onnxruntime-gpu + CUDA 12.x 运行时
+gpu = [
+    "onnxruntime-gpu",
+    "nvidia-cublas-cu12",
+    "nvidia-cuda-runtime-cu12",
+    "nvidia-cufft-cu12",
+]
 
 [tool.poetry.dev-dependencies]
 

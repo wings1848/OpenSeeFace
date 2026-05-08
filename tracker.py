@@ -85,22 +85,21 @@ def intersects(r1, r2, amount=0.3):
 def group_rects(rects):
     rect_groups = {}
     for rect in rects:
-        rect_groups[str(rect)] = [-1, -1, []]
+        rect_groups[tuple(rect)] = [-1, -1, []]
     group_id = 0
     for i, rect in enumerate(rects):
-        name = str(rect)
+        key = tuple(rect)
         group = group_id
         group_id += 1
-        if rect_groups[name][0] < 0:
-            rect_groups[name] = [group, -1, []]
+        if rect_groups[key][0] < 0:
+            rect_groups[key] = [group, -1, []]
         else:
-            group = rect_groups[name][0]
+            group = rect_groups[key][0]
         for j, other_rect in enumerate(rects):
             if i == j:
-                continue;
-            inter = intersects(rect, other_rect)
+                continue
             if intersects(rect, other_rect):
-                rect_groups[str(other_rect)] = [group, -1, []]
+                rect_groups[tuple(other_rect)] = [group, -1, []]
     return rect_groups
 
 def logit(p, factor=16.0):
@@ -139,9 +138,12 @@ def worker_thread(session, frame, input, crop_info, queue, input_name, idx, trac
     output = session.run([], {input_name: input})[0]
     conf, lms = tracker.landmarks(output[0], crop_info)
     if conf > tracker.threshold:
-        try:
-            eye_state = tracker.get_eye_state(frame, lms)
-        except:
+        if not tracker.no_gaze:
+            try:
+                eye_state = tracker.get_eye_state(frame, lms)
+            except:
+                eye_state = [(1.0, 0.0, 0.0, 0.0), (1.0, 0.0, 0.0, 0.0)]
+        else:
             eye_state = [(1.0, 0.0, 0.0, 0.0), (1.0, 0.0, 0.0, 0.0)]
         queue.put((session, conf, (lms, eye_state), crop_info, idx))
     else:
@@ -494,7 +496,7 @@ def get_model_base_path(model_dir):
     return model_base_path
 
 class Tracker():
-    def __init__(self, width, height, model_type=3, detection_threshold=0.6, threshold=None, max_faces=1, discard_after=5, scan_every=3, bbox_growth=0.0, max_threads=4, silent=False, model_dir=None, no_gaze=False, use_retinaface=False, max_feature_updates=0, static_model=False, feature_level=2, try_hard=False):
+    def __init__(self, width, height, model_type=3, detection_threshold=0.6, threshold=None, max_faces=1, discard_after=5, scan_every=3, bbox_growth=0.0, max_threads=4, silent=False, model_dir=None, no_gaze=False, use_retinaface=False, max_feature_updates=0, static_model=False, feature_level=2, try_hard=False, adjust_3d_interval=1):
         options = onnxruntime.SessionOptions()
         options.inter_op_num_threads = 1
         options.intra_op_num_threads = min(max_threads,4)
@@ -502,20 +504,6 @@ class Tracker():
         options.graph_optimization_level = onnxruntime.GraphOptimizationLevel.ORT_ENABLE_ALL
         options.log_severity_level = 3
         self.model_type = model_type
-        self.models = [
-            "lm_model0_opt.onnx",
-            "lm_model1_opt.onnx",
-            "lm_model2_opt.onnx",
-            "lm_model3_opt.onnx",
-            "lm_model4_opt.onnx"
-        ]
-        model = "lm_modelT_opt.onnx"
-        if model_type >= 0:
-            model = self.models[self.model_type]
-        if model_type == -2:
-            model = "lm_modelV_opt.onnx"
-        if model_type == -3:
-            model = "lm_modelU_opt.onnx"
         model_base_path = get_model_base_path(model_dir)
 
         if threshold is None:
@@ -523,13 +511,40 @@ class Tracker():
             if model_type < 0:
                 threshold = 0.87
 
-        self.retinaface = RetinaFaceDetector(model_path=os.path.join(model_base_path, "retinaface_640x640_opt.onnx"), json_path=os.path.join(model_base_path, "priorbox_640x640.json"), threads=max(max_threads,4), top_k=max_faces, res=(640, 640))
-        self.retinaface_scan = RetinaFaceDetector(model_path=os.path.join(model_base_path, "retinaface_640x640_opt.onnx"), json_path=os.path.join(model_base_path, "priorbox_640x640.json"), threads=2, top_k=max_faces, res=(640, 640))
+        # Detect GPU acceleration availability and configure accordingly
+        # (must happen before model file selection)
+        if 'CUDAExecutionProvider' in onnxruntime.capi._pybind_state.get_available_providers():
+            providersList = ['CUDAExecutionProvider', 'CPUExecutionProvider']
+            self._use_gpu = True
+            model_suffix = '_gpu.onnx'
+            options.intra_op_num_threads = 1
+        else:
+            providersList = onnxruntime.capi._pybind_state.get_available_providers()
+            self._use_gpu = False
+            model_suffix = '_opt.onnx'
+
+        self.retinaface = RetinaFaceDetector(model_path=os.path.join(model_base_path, f"retinaface_640x640{model_suffix}"), json_path=os.path.join(model_base_path, "priorbox_640x640.json"), threads=max(max_threads,4), top_k=max_faces, res=(640, 640), providers=providersList)
+        self.retinaface_scan = RetinaFaceDetector(model_path=os.path.join(model_base_path, f"retinaface_640x640{model_suffix}"), json_path=os.path.join(model_base_path, "priorbox_640x640.json"), threads=2, top_k=max_faces, res=(640, 640), providers=providersList)
         self.use_retinaface = use_retinaface
 
-        # OTR 1.9 and later requires specifying providers
-        # explicitly as an argument in InferenceSession()
-        providersList = onnxruntime.capi._pybind_state.get_available_providers()
+        # Build model filename with appropriate suffix
+        def model_name(base):
+            return base + model_suffix
+
+        self.models = [
+            model_name("lm_model0"),
+            model_name("lm_model1"),
+            model_name("lm_model2"),
+            model_name("lm_model3"),
+            model_name("lm_model4")
+        ]
+        model = model_name("lm_modelT")
+        if model_type >= 0:
+            model = self.models[self.model_type]
+        if model_type == -2:
+            model = model_name("lm_modelV")
+        if model_type == -3:
+            model = model_name("lm_modelU")
 
         # Single face instance with multiple threads
         self.session = onnxruntime.InferenceSession(os.path.join(model_base_path, model), sess_options=options, providers=providersList)
@@ -541,11 +556,14 @@ class Tracker():
         for i in range(self.max_workers):
             options = onnxruntime.SessionOptions()
             options.inter_op_num_threads = 1
-            options.intra_op_num_threads = min(max(max_threads // self.max_workers, 4), 1)
-            if options.intra_op_num_threads < 1:
+            if self._use_gpu:
                 options.intra_op_num_threads = 1
-            elif i < extra_threads:
-                options.intra_op_num_threads += 1
+            else:
+                options.intra_op_num_threads = min(max(max_threads // self.max_workers, 4), 1)
+                if options.intra_op_num_threads < 1:
+                    options.intra_op_num_threads = 1
+                elif i < extra_threads:
+                    options.intra_op_num_threads += 1
             options.execution_mode = onnxruntime.ExecutionMode.ORT_SEQUENTIAL
             options.graph_optimization_level = onnxruntime.GraphOptimizationLevel.ORT_ENABLE_ALL
             self.sessions.append(onnxruntime.InferenceSession(os.path.join(model_base_path, model), sess_options=options, providers=providersList))
@@ -553,13 +571,13 @@ class Tracker():
 
         options = onnxruntime.SessionOptions()
         options.inter_op_num_threads = 1
-        options.intra_op_num_threads = 1
+        options.intra_op_num_threads = 1 if self._use_gpu else 1
         options.execution_mode = onnxruntime.ExecutionMode.ORT_SEQUENTIAL
         options.graph_optimization_level = onnxruntime.GraphOptimizationLevel.ORT_ENABLE_ALL
         options.log_severity_level = 3
-        self.gaze_model = onnxruntime.InferenceSession(os.path.join(model_base_path, "mnv3_gaze32_split_opt.onnx"), sess_options=options, providers=providersList)
+        self.gaze_model = onnxruntime.InferenceSession(os.path.join(model_base_path, model_name("mnv3_gaze32_split")), sess_options=options, providers=providersList)
 
-        self.detection = onnxruntime.InferenceSession(os.path.join(model_base_path, "mnv3_detection_opt.onnx"), sess_options=options, providers=providersList)
+        self.detection = onnxruntime.InferenceSession(os.path.join(model_base_path, model_name("mnv3_detection")), sess_options=options, providers=providersList)
         self.faces = []
 
         # Image normalization constants
@@ -701,8 +719,11 @@ class Tracker():
             self.feature_level = min(feature_level, 1)
         self.max_feature_updates = max_feature_updates
         self.static_model = static_model
+        self.adjust_3d_interval = adjust_3d_interval
         self.face_info = [FaceInfo(id, self) for id in range(max_faces)]
         self.fail_count = 0
+        self.no_face_consecutive = 0
+        self.backoff_interval = 1
 
     def detect_faces(self, frame):
         im = cv2.resize(frame, (224, 224), interpolation=cv2.INTER_LINEAR)[:,:,::-1] * self.std_224 + self.mean_224
@@ -1046,16 +1067,27 @@ class Tracker():
         new_faces.extend(additional_faces)
         self.wait_count += 1
         if self.detected == 0:
-            start_fd = time.perf_counter()
-            if self.use_retinaface > 0 or self.try_hard:
-                retinaface_detections = self.retinaface.detect_retina(frame)
-                new_faces.extend(retinaface_detections)
-            if self.use_retinaface == 0 or self.try_hard:
-                new_faces.extend(self.detect_faces(frame))
-            if self.try_hard:
-                new_faces.extend([(0, 0, self.width, self.height)])
-            duration_fd = 1000 * (time.perf_counter() - start_fd)
-            self.wait_count = 0
+            self.no_face_consecutive += 1
+            # Adaptive backoff: reduce detection frequency when no face is present
+            if self.no_face_consecutive > 90:
+                self.backoff_interval = 10
+            elif self.no_face_consecutive > 30:
+                self.backoff_interval = 3
+            else:
+                self.backoff_interval = 1
+            if self.wait_count < self.backoff_interval:
+                pass  # skip this frame's detection
+            else:
+                start_fd = time.perf_counter()
+                if self.use_retinaface > 0 or self.try_hard:
+                    retinaface_detections = self.retinaface.detect_retina(frame)
+                    new_faces.extend(retinaface_detections)
+                if self.use_retinaface == 0 or self.try_hard:
+                    new_faces.extend(self.detect_faces(frame))
+                if self.try_hard:
+                    new_faces.extend([(0, 0, self.width, self.height)])
+                duration_fd = 1000 * (time.perf_counter() - start_fd)
+                self.wait_count = 0
         elif self.detected < self.max_faces:
             if self.use_retinaface > 0:
                 new_faces.extend(self.retinaface_scan.get_results())
@@ -1107,9 +1139,12 @@ class Tracker():
             output = self.session.run([], {self.input_name: crops[0]})[0]
             conf, lms = self.landmarks(output[0], crop_info[0])
             if conf > self.threshold:
-                try:
-                    eye_state = self.get_eye_state(frame, lms)
-                except:
+                if not self.no_gaze:
+                    try:
+                        eye_state = self.get_eye_state(frame, lms)
+                    except:
+                        eye_state = [(1.0, 0.0, 0.0, 0.0), (1.0, 0.0, 0.0, 0.0)]
+                else:
                     eye_state = [(1.0, 0.0, 0.0, 0.0), (1.0, 0.0, 0.0, 0.0)]
                 outputs[crop_info[0]] = (conf, (lms, eye_state), 0)
         else:
@@ -1152,7 +1187,7 @@ class Tracker():
             conf, lms, i, bb = outputs[crop]
             if conf < self.threshold:
                 continue;
-            group_id = groups[str(bb)][0]
+            group_id = groups[tuple(bb)][0]
             if not group_id in best_results:
                 best_results[group_id] = [-1, [], 0]
             if conf > self.threshold and best_results[group_id][0] < conf + crop[4]:
@@ -1169,13 +1204,21 @@ class Tracker():
         start_pnp = time.perf_counter()
         for face_info in self.face_info:
             if face_info.alive and face_info.conf > self.threshold:
-                face_info.success, face_info.quaternion, face_info.euler, face_info.pnp_error, face_info.pts_3d, face_info.lms = self.estimate_depth(face_info)
-                face_info.adjust_3d()
-                lms = face_info.lms[:, 0:2]
-                x1, y1 = tuple(lms[0:66].min(0))
-                x2, y2 = tuple(lms[0:66].max(0))
-                bbox = (y1, x1, y2 - y1, x2 - x1)
-                face_info.bbox = bbox
+                if face_info.conf > 0.3:
+                    face_info.success, face_info.quaternion, face_info.euler, face_info.pnp_error, face_info.pts_3d, face_info.lms = self.estimate_depth(face_info)
+                    if self.adjust_3d_interval <= 1 or self.frame_count % self.adjust_3d_interval == 0:
+                        face_info.adjust_3d()
+                    lms = face_info.lms[:, 0:2]
+                    x1, y1 = tuple(lms[0:66].min(0))
+                    x2, y2 = tuple(lms[0:66].max(0))
+                    bbox = (y1, x1, y2 - y1, x2 - x1)
+                else:
+                    # Low-confidence: use raw landmark bounding box without 3D fitting
+                    lms_2d = np.array(face_info.lms)[:, 0:2]
+                    x1, y1 = tuple(lms_2d.min(0))
+                    x2, y2 = tuple(lms_2d.max(0))
+                    bbox = (y1, x1, y2 - y1, x2 - x1)
+                    face_info.bbox = bbox
                 detected.append(bbox)
                 results.append(face_info)
         duration_pnp += 1000 * (time.perf_counter() - start_pnp)
@@ -1184,6 +1227,8 @@ class Tracker():
             self.detected = len(detected)
             self.faces = detected
             self.discard = 0
+            self.no_face_consecutive = 0
+            self.backoff_interval = 1
         else:
             self.detected = 0
             self.discard += 1

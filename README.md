@@ -1,5 +1,7 @@
 ![OSF.png](https://raw.githubusercontent.com/emilianavt/OpenSeeFace/master/Images/OSF.png)
 
+> 📖 **中文文档请见 [README_zh.md](README_zh.md)** | Chinese documentation available [here](README_zh.md)
+
 # Overview
 
 **Note**: This is a tracking library, **not** a stand-alone avatar puppeteering program. I'm also working on [VSeeFace](https://www.vseeface.icu/), which allows animating [VRM](https://vrm.dev/en/how_to_make_vrm/) and [VSFAvatar](https://www.youtube.com/watch?v=jhQ8DF87I5I) 3D models by using OpenSeeFace tracking. [VTube Studio](https://denchisoft.com/) uses OpenSeeFace for webcam based tracking to animate Live2D models. A renderer for the Godot engine can be found [here](https://github.com/virtual-puppet-project/vpuppr).
@@ -23,6 +25,93 @@ I ran OpenSeeFace on a sample clip from the video presentation for [3D Face Reco
 # Usage
 
 A sample Unity project for VRM based avatar animation can be found [here](https://github.com/emilianavt/OpenSeeFaceSample).
+
+## Startup Script (Recommended)
+
+For a quick interactive setup, use the provided startup script:
+
+```bash
+./start_opensseface.sh          # First run: interactive wizard
+./start_opensseface.sh          # Later runs: uses saved config silently
+./start_opensseface.sh reconfig # Force re-configuration
+./start_opensseface.sh --help   # Show usage
+```
+
+It will walk you through:
+- Camera vs video file selection
+- Quality/speed presets (from "极致性能" to "高质量")
+- UDP output configuration
+- Thread count and logging options
+
+The script runs the tracker in the background and saves the PID for easy management.
+Use `./start_opensseface.sh stop` to safely stop the tracker and clean up.
+
+### Automatic Environment Setup
+
+The script **automatically creates and activates a virtual environment** using `uv`
+if none exists, and installs all required dependencies.
+
+Dependencies are declared in `pyproject.toml` via extras:
+
+```bash
+uv pip install -e ".[cpu]"   # CPU-only (onnxruntime)
+uv pip install -e ".[gpu]"   # GPU-accelerated (onnxruntime-gpu + CUDA 12.x)
+```
+
+On first run, the script **auto-detects NVIDIA GPU** availability:
+- **GPU detected** → installs `.[gpu]` extra (CUDA-accelerated)
+- **No GPU** → installs `.[cpu]` extra (CPU fallback)
+
+No manual setup steps are needed — just run the script.
+
+### Configuration Persistence
+
+On first run, all settings are saved to `.facetracker_config` in the project root.
+Subsequent runs **skip the interactive wizard** and reuse the saved configuration
+automatically \[silent mode\]. Use `reconfig` to re-enter the wizard and update settings.
+
+The script also automatically kills any existing `facetracker.py` processes before
+starting a new one, ensuring a clean restart.
+
+### VTube Studio (Linux Setup)
+
+To use OpenSeeFace with VTube Studio on Linux, you need to tell VTube Studio where
+to receive UDP tracking data. This is done via an `ip.txt` file.
+
+**1. Locate the VTube Studio data directory:**
+
+```bash
+# Default Steam path (most distributions)
+VTUBE_DIR="$HOME/.local/share/Steam/steamapps/common/VTube Studio/VTube Studio_Data/StreamingAssets"
+
+# Alternative: Flatpak Steam
+# VTUBE_DIR="$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common/VTube Studio/VTube Studio_Data/StreamingAssets"
+```
+
+**2. Create `ip.txt`:**
+
+```bash
+mkdir -p "$VTUBE_DIR"
+cat > "$VTUBE_DIR/ip.txt" << 'EOF'
+ip=127.0.0.1
+port=11573
+EOF
+```
+
+**3. Start OpenSeeFace** with matching UDP settings (default):
+
+```bash
+./start_opensseface.sh   # UDP defaults: 127.0.0.1:11573
+```
+
+**4. Launch VTube Studio.** It will automatically read `ip.txt` and begin receiving
+tracking data. If it doesn't work, try restarting VTube Studio after starting
+OpenSeeFace.
+
+> **Note**: The `ip=` and `port=` values in `ip.txt` must match the `-i` / `-p`
+> parameters passed to `facetracker.py`. Default is `127.0.0.1` / `11573`.
+
+## Manual Usage
 
 The face tracking itself is done by the `facetracker.py` Python 3.7 script. It is a commandline program, so you should start it manually from cmd or write a batch file to start it. If you downloaded a release and are on Windows, you can run the `facetracker.exe` inside the `Binary` folder without having Python installed. You can also use the `run.bat` inside the `Binary` folder for a basic demonstration of the tracker.
 
@@ -220,6 +309,87 @@ Face detection is done using a custom heatmap regression based face detection mo
     }
 
 RetinaFace detection is based on [this](https://github.com/biubug6/Pytorch_Retinaface) implementation. The pretrained model was modified to remove unnecessary landmark detection and converted to ONNX format for a resolution of 640x640.
+
+---
+
+# Performance Optimizations
+
+This fork includes a series of performance optimizations that improve tracking speed while maintaining full backward compatibility (same CLI, same UDP binary format).
+
+See the full [Optimization Report](Docs/OPTIMIZATION_REPORT.md) for detailed explanations.
+
+## GPU Acceleration (CUDA)
+
+OpenSeeFace supports **NVIDIA GPU acceleration** via onnxruntime-gpu + CUDA 12.x.
+
+| Model | CPU FPS (single-core) | **GPU FPS (GTX 1660 Ti)** | Speedup |
+|---|---|---|---|
+| 3 (high quality) | 125 | **210** | **×1.68** |
+| 2 | 133 | **231** | **×1.74** |
+| 1 | 169 | **278** | **×1.65** |
+| 0 | 142 | **288** | **×2.03** |
+| -1 (fastest) | 299 | **512** | **×1.71** |
+| -2 | 176 | **294** | **×1.67** |
+| -3 | 236 | **330** | **×1.40** |
+
+### Automatic GPU Setup
+
+The startup script **auto-detects NVIDIA GPU** and installs the correct dependencies:
+- **GPU detected** → `uv pip install -e ".[gpu]"` (onnxruntime-gpu + CUDA 12.x runtime)
+- **No GPU** → `uv pip install -e ".[cpu]"` (onnxruntime, CPU-only)
+
+All GPU dependencies are declared as a `[gpu]` extra in `pyproject.toml`:
+```toml
+[tool.poetry.extras]
+cpu = ["onnxruntime"]
+gpu = ["onnxruntime-gpu", "nvidia-cublas-cu12",
+       "nvidia-cuda-runtime-cu12", "nvidia-cufft-cu12"]
+```
+
+Manual installation (if needed):
+```bash
+uv pip install -e ".[gpu]"   # GPU-accelerated
+uv pip install -e ".[cpu]"   # CPU-only
+```
+
+### How It Works
+
+1. **Auto-detection**: onnxruntime-gpu reports `CUDAExecutionProvider` availability
+2. **Model switching**: Tracker automatically selects `_gpu.onnx` model files (with `FusedConv` ops decomposed into `Conv + activation`)
+3. **Provider priority**: `CUDAExecutionProvider` → `CPUExecutionProvider` fallback
+4. **No GPU**: automatically falls back to CPU `_opt.onnx` models
+
+The startup script `./start_opensseface.sh` automatically sets up the CUDA runtime path.
+
+## Quick Start
+
+```bash
+./start_opensseface.sh          # Interactive startup script (recommended)
+```
+
+Or run directly:
+
+```bash
+python facetracker.py --model 2 --try-hard 1 --max-threads 4 --visualize 1
+```
+
+## Optimizations Summary
+
+| # | Optimization | File | Benefit |
+|---|---|---|---|
+| 1 | `group_rects` str → tuple keys | `tracker.py` | Less memory allocation per frame |
+| 2 | Skip gaze model when disabled | `tracker.py` | 2-5 ms/frame with `--gaze-tracking 0` |
+| 3 | Adaptive detection backoff | `tracker.py` | 70-90% fewer detections when no face |
+| 4 | Configurable `adjust_3d` interval | `tracker.py` | Reduce CPU via `adjust_3d_interval=N` |
+| 5 | Skip 3D fitting on low confidence | `tracker.py` | Skip `estimate_depth` when conf ≤ 0.3 |
+| 6 | Batch UDP struct packing | `facetracker.py` | 18 calls → 5, same binary output |
+| 7 | Remove redundant `bytearray()` | `facetracker.py` | Less intermediate allocation |
+| 8 | GC throttling + threshold tuning | `facetracker.py` | Fewer stop-the-world pauses |
+| 9 | **GPU (CUDA/TensorRT) acceleration** | `tracker.py`, models | **1.4x–2.0x FPS boost** on NVIDIA GPUs |
+
+**Backward compatibility verified**: UDP packets byte-identical, all CLI params unchanged, all class public interfaces preserved.
+
+---
 
 # Thanks!
 

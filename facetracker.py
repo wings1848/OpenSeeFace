@@ -5,6 +5,9 @@ import argparse
 import traceback
 import gc
 
+# Tune GC: higher thresholds reduce collection frequency, improving real-time performance
+gc.set_threshold(700, 10, 10)
+
 parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 parser.add_argument("-i", "--ip", help="Set IP address for sending tracking data", default="127.0.0.1")
 parser.add_argument("-p", "--port", type=int, help="Set port for sending tracking data", default=11573)
@@ -277,35 +280,21 @@ try:
                 detected = True
                 if not f.success:
                     pts_3d = np.zeros((70, 3), np.float32)
-                packet.extend(bytearray(struct.pack("d", now)))
-                packet.extend(bytearray(struct.pack("i", f.id)))
-                packet.extend(bytearray(struct.pack("f", width)))
-                packet.extend(bytearray(struct.pack("f", height)))
-                packet.extend(bytearray(struct.pack("f", f.eye_blink[0])))
-                packet.extend(bytearray(struct.pack("f", f.eye_blink[1])))
-                packet.extend(bytearray(struct.pack("B", 1 if f.success else 0)))
-                packet.extend(bytearray(struct.pack("f", f.pnp_error)))
-                packet.extend(bytearray(struct.pack("f", f.quaternion[0])))
-                packet.extend(bytearray(struct.pack("f", f.quaternion[1])))
-                packet.extend(bytearray(struct.pack("f", f.quaternion[2])))
-                packet.extend(bytearray(struct.pack("f", f.quaternion[3])))
-                packet.extend(bytearray(struct.pack("f", f.euler[0])))
-                packet.extend(bytearray(struct.pack("f", f.euler[1])))
-                packet.extend(bytearray(struct.pack("f", f.euler[2])))
-                packet.extend(bytearray(struct.pack("f", f.translation[0])))
-                packet.extend(bytearray(struct.pack("f", f.translation[1])))
-                packet.extend(bytearray(struct.pack("f", f.translation[2])))
+                packet.extend(struct.pack("=di", now, f.id))
+                packet.extend(struct.pack("=ffffBf", width, height, f.eye_blink[0], f.eye_blink[1], 1 if f.success else 0, f.pnp_error))
+                packet.extend(struct.pack("=ffff", f.quaternion[0], f.quaternion[1], f.quaternion[2], f.quaternion[3]))
+                packet.extend(struct.pack("=fff", f.euler[0], f.euler[1], f.euler[2]))
+                packet.extend(struct.pack("=fff", f.translation[0], f.translation[1], f.translation[2]))
                 if log is not None:
                     log.write(f"{frame_count},{now},{width},{height},{fps},{face_num},{f.id},{f.eye_blink[0]},{f.eye_blink[1]},{f.conf},{f.success},{f.pnp_error},{f.quaternion[0]},{f.quaternion[1]},{f.quaternion[2]},{f.quaternion[3]},{f.euler[0]},{f.euler[1]},{f.euler[2]},{f.rotation[0]},{f.rotation[1]},{f.rotation[2]},{f.translation[0]},{f.translation[1]},{f.translation[2]}")
                 for (x,y,c) in f.lms:
-                    packet.extend(bytearray(struct.pack("f", c)))
+                    packet.extend(struct.pack("f", c))
                 if args.visualize > 1:
                     frame = cv2.putText(frame, str(f.id), (int(f.bbox[0]), int(f.bbox[1])), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255,0,255))
                 if args.visualize > 2:
                     frame = cv2.putText(frame, f"{f.conf:.4f}", (int(f.bbox[0] + 18), int(f.bbox[1] - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255))
                 for pt_num, (x,y,c) in enumerate(f.lms):
-                    packet.extend(bytearray(struct.pack("f", y)))
-                    packet.extend(bytearray(struct.pack("f", x)))
+                    packet.extend(struct.pack("=ff", y, x))
                     if log is not None:
                         log.write(f",{y},{x},{c}")
                     if pt_num == 66 and (f.eye_blink[0] < 0.30 or c < 0.20):
@@ -342,19 +331,14 @@ try:
                         if not (x < 0 or y < 0 or x >= height or y >= width):
                             frame[int(x), int(y)] = (0, 255, 255)
                 for (x,y,z) in f.pts_3d:
-                    packet.extend(bytearray(struct.pack("f", x)))
-                    packet.extend(bytearray(struct.pack("f", -y)))
-                    packet.extend(bytearray(struct.pack("f", -z)))
+                    packet.extend(struct.pack("=fff", x, -y, -z))
                     if log is not None:
                         log.write(f",{x},{-y},{-z}")
                 if f.current_features is None:
                     f.current_features = {}
-                for feature in features:
-                    if not feature in f.current_features:
-                        f.current_features[feature] = 0
-                    packet.extend(bytearray(struct.pack("f", f.current_features[feature])))
-                    if log is not None:
-                        log.write(f",{f.current_features[feature]}")
+                packet.extend(struct.pack("=" + "f" * len(features), *[f.current_features.get(feat, 0) for feat in features]))
+                if log is not None:
+                    log.write("," + ",".join(str(f.current_features.get(feat, 0)) for feat in features))
                 if log is not None:
                     log.write("\r\n")
                     log.flush()
@@ -430,15 +414,14 @@ try:
             if failures > 30:
                 break
 
-        collected = False
         del frame
+
+        # Throttle GC: only collect every 30 frames to avoid stop-the-world jitter
+        if frame_count % 30 == 0:
+            gc.collect()
 
         duration = time.perf_counter() - frame_time
         while duration < target_duration:
-            if not collected:
-                gc.collect()
-                collected = True
-            duration = time.perf_counter() - frame_time
             sleep_time = target_duration - duration
             if sleep_time > 0:
                 time.sleep(sleep_time)
