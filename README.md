@@ -1,344 +1,287 @@
-![OSF.png](https://raw.githubusercontent.com/emilianavt/OpenSeeFace/master/Images/OSF.png)
+# Linux端的vtube-studio面捕方案
 
-> 📖 **中文文档请见 [README_zh.md](README_zh.md)** | Chinese documentation available [here](README_zh.md)
+[![OSF.png](Images/OSF.png)](https://github.com/emilianavt/OpenSeeFace)
 
-# Overview
+> 📖 **English documentation: [README.md](README_en.md)** | 英文文档请见 [README.md](README_en.md)
 
-**Note**: This is a tracking library, **not** a stand-alone avatar puppeteering program. I'm also working on [VSeeFace](https://www.vseeface.icu/), which allows animating [VRM](https://vrm.dev/en/how_to_make_vrm/) and [VSFAvatar](https://www.youtube.com/watch?v=jhQ8DF87I5I) 3D models by using OpenSeeFace tracking. [VTube Studio](https://denchisoft.com/) uses OpenSeeFace for webcam based tracking to animate Live2D models. A renderer for the Godot engine can be found [here](https://github.com/virtual-puppet-project/vpuppr).
 
-This project implements a facial landmark detection model based on MobileNetV3.
+> 本项目基于OpenSeeFace魔改 
+> **基于 MobileNetV3 的人脸特征点检测项目**  
+> 通过摄像头或视频文件进行实时面部追踪，通过 UDP 协议将数据发送给 VTube studio 等应用。
 
-As Pytorch 1.3 CPU inference speed on Windows is very low, the model was converted to ONNX format. Using [onnxruntime](https://github.com/microsoft/onnxruntime) it can run at 30 - 60 fps tracking a single face. There are four models, with different speed to tracking quality trade-offs.
+---
 
-If anyone is curious, the name is a silly pun on the open seas and seeing faces. There's no deeper meaning.
+## 目录
 
-An up to date sample video can be found [here](https://www.youtube.com/watch?v=AaNap_ud_3I&vq=hd1080), showing the default tracking model's performance under different noise and light levels.
+- [快速开始](#快速开始)
+- [VTube Studio 配置（Linux）](#vtube-studio-配置linux)
+- [启动脚本](#启动脚本)
+- [手动运行](#手动运行)
+- [参数说明](#参数说明)
+- [模型选择](#模型选择)
+- [GPU 加速](#gpu-加速-cuda)
+- [性能优化](#性能优化)
+- [常见问题](#常见问题)
 
-# Tracking quality
+---
 
-Since the landmarks used by OpenSeeFace are a bit different from those used by other approaches (they are close to iBUG 68, with two less points in the mouth corners and quasi-3D face contours instead of face contours that follow the visible outline) it is hard to numerically compare its accuracy to that of other approaches found commonly in scientific literature. The tracking performance is also more optimized for making landmarks that are useful for animating an avatar than for exactly fitting the face image. For example, as long as the eye landmarks show whether the eyes are opened or closed, even if their location is somewhat off, they can still be useful for this purpose.
+## 快速开始
 
-From general observation, OpenSeeFace performs well in adverse conditions (low light, high noise, low resolution) and keeps tracking faces through a very wide range of head poses with relatively high stability of landmark positions. Compared to MediaPipe, OpenSeeFace landmarks remain more stable in challenging conditions and it accurately represents a wider range of mouth poses. However, tracking of the eye region can be less accurate.
+## VTube Studio 配置（Linux）
 
-I ran OpenSeeFace on a sample clip from the video presentation for [3D Face Reconstruction with Dense Landmarks](https://microsoft.github.io/DenseLandmarks/) by Wood et al. to compare it to MediaPipe and their approach. You can watch the result [here](https://www.vseeface.icu/assets/media/OSFMediaPipe3DFR.mp4).
+在 Linux 上使用 **VTube Studio** 接收 OpenSeeFace 的面部捕捉数据，需要配置 UDP 连接。
+VTube Studio 通过读取 `ip.txt` 文件来知道从哪里接收追踪数据。
 
-# Usage
+### 1. 确定 VTube Studio 数据目录
 
-A sample Unity project for VRM based avatar animation can be found [here](https://github.com/emilianavt/OpenSeeFaceSample).
+根据 Steam 安装方式不同，路径有所差异：
 
-## Startup Script (Recommended)
+| Steam 安装方式 | StreamingAssets 路径 |
+|---|---|
+| **默认 (原生)** | `~/.local/share/Steam/steamapps/common/VTube Studio/VTube Studio_Data/StreamingAssets/` |
+| **Flatpak** | `~/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common/VTube Studio/VTube Studio_Data/StreamingAssets/` |
 
-For a quick interactive setup, use the provided startup script:
+### 2. 创建 ip.txt
 
-```bash
-./start_opensseface.sh          # First run: interactive wizard
-./start_opensseface.sh          # Later runs: uses saved config silently
-./start_opensseface.sh reconfig # Force re-configuration
-./start_opensseface.sh --help   # Show usage
-```
-
-It will walk you through:
-- Camera vs video file selection
-- Quality/speed presets (from "极致性能" to "高质量")
-- UDP output configuration
-- Thread count and logging options
-
-The script runs the tracker in the background and saves the PID for easy management.
-Use `./start_opensseface.sh stop` to safely stop the tracker and clean up.
-
-### Automatic Environment Setup
-
-The script **automatically creates and activates a virtual environment** using `uv`
-if none exists, and installs all required dependencies.
-
-Dependencies are declared in `pyproject.toml` via extras:
+`ip.txt` 使用 `key=value` 格式，每行一个参数：
 
 ```bash
-uv pip install -e ".[cpu]"   # CPU-only (onnxruntime)
-uv pip install -e ".[gpu]"   # GPU-accelerated (onnxruntime-gpu + CUDA 12.x)
-```
+# 创建目录（如果不存在）
+mkdir -p "$HOME/.local/share/Steam/steamapps/common/VTube Studio/VTube Studio_Data/StreamingAssets"
 
-On first run, the script **auto-detects NVIDIA GPU** availability:
-- **GPU detected** → installs `.[gpu]` extra (CUDA-accelerated)
-- **No GPU** → installs `.[cpu]` extra (CPU fallback)
-
-No manual setup steps are needed — just run the script.
-
-### Configuration Persistence
-
-On first run, all settings are saved to `.facetracker_config` in the project root.
-Subsequent runs **skip the interactive wizard** and reuse the saved configuration
-automatically \[silent mode\]. Use `reconfig` to re-enter the wizard and update settings.
-
-The script also automatically kills any existing `facetracker.py` processes before
-starting a new one, ensuring a clean restart.
-
-### VTube Studio (Linux Setup)
-
-To use OpenSeeFace with VTube Studio on Linux, you need to tell VTube Studio where
-to receive UDP tracking data. This is done via an `ip.txt` file.
-
-**1. Locate the VTube Studio data directory:**
-
-```bash
-# Default Steam path (most distributions)
-VTUBE_DIR="$HOME/.local/share/Steam/steamapps/common/VTube Studio/VTube Studio_Data/StreamingAssets"
-
-# Alternative: Flatpak Steam
-# VTUBE_DIR="$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common/VTube Studio/VTube Studio_Data/StreamingAssets"
-```
-
-**2. Create `ip.txt`:**
-
-```bash
-mkdir -p "$VTUBE_DIR"
-cat > "$VTUBE_DIR/ip.txt" << 'EOF'
+# 写入 UDP 配置（默认值）
+cat > "$HOME/.local/share/Steam/steamapps/common/VTube Studio/VTube Studio_Data/StreamingAssets/ip.txt" << 'EOF'
 ip=127.0.0.1
 port=11573
 EOF
 ```
 
-**3. Start OpenSeeFace** with matching UDP settings (default):
+### 3. 启动顺序
 
 ```bash
-./start_opensseface.sh   # UDP defaults: 127.0.0.1:11573
+# 1. 先启动 OpenSeeFace 面部追踪
+./start_opensseface.sh
+
+# 2. 再启动 VTube Studio
+# VTube Studio 启动时自动读取 ip.txt，开始接收追踪数据
 ```
 
-**4. Launch VTube Studio.** It will automatically read `ip.txt` and begin receiving
-tracking data. If it doesn't work, try restarting VTube Studio after starting
-OpenSeeFace.
-
-> **Note**: The `ip=` and `port=` values in `ip.txt` must match the `-i` / `-p`
-> parameters passed to `facetracker.py`. Default is `127.0.0.1` / `11573`.
-
-## Manual Usage
-
-The face tracking itself is done by the `facetracker.py` Python 3.7 script. It is a commandline program, so you should start it manually from cmd or write a batch file to start it. If you downloaded a release and are on Windows, you can run the `facetracker.exe` inside the `Binary` folder without having Python installed. You can also use the `run.bat` inside the `Binary` folder for a basic demonstration of the tracker.
-
-The script will perform the tracking on webcam input or video file and send the tracking data over UDP. This design also allows tracking to be done on a separate PC from the one who uses the tracking information. This can be useful to enhance performance and to avoid accidentially revealing camera footage.
-
-The provided `OpenSee` Unity component can receive these UDP packets and provides the received information through a public field called `trackingData`. The `OpenSeeShowPoints` component can visualize the landmark points of a detected face. It also serves as an example. Please look at it to see how to properly make use of the `OpenSee` component. Further examples are included in the `Examples` folder. The UDP packets are received in a separate thread, so any components using the `trackingData` field of the `OpenSee` component should first copy the field and access this copy, because otherwise the information may get overwritten during processing. This design also means that the field will keep updating, even if the `OpenSee` component is disabled.
-
-Run the python script with `--help` to learn about the possible options you can set.
-
-    python facetracker.py --help
-
-A simple demonstration can be achieved by creating a new scene in Unity, adding an empty game object and both the `OpenSee` and `OpenSeeShowPoints` components to it. While the scene is playing, run the face tracker on a video file:
-
-    python facetracker.py --visualize 3 --pnp-points 1 --max-threads 4 -c video.mp4
-
-__Note__: If dependencies were installed using [poetry](https://python-poetry.org/), the commands have to be executed from a `poetry shell` or have to be prefixed with `poetry run`.
-
-This way the tracking script will output its own tracking visualization while also demonstrating the transmission of tracking data to Unity.
-
-The included `OpenSeeLauncher` component allows starting the face tracker program from Unity. It is designed to work with the pyinstaller created executable distributed in the binary release bundles. It provides three public API functions:
-
-* `public string[] ListCameras()` returns the names of available cameras. The index of the camera in the array corresponds to its ID for the `cameraIndex` field. Setting the `cameraIndex` to `-1` will disable webcam capturing.
-* `public bool StartTracker()` will start the tracker. If it is already running, it will shut down the running instance and start a new one with the current settings.
-* `public void StopTracker()` will stop the tracker. The tracker is stopped automatically when the application is terminated or the `OpenSeeLauncher` object is destroyed.
-
-The `OpenSeeLauncher` component uses WinAPI job objects to ensure that the tracker child process is terminated if the application crashes or closes without terminating the tracker process first.
-
-Additional custom commandline arguments should be added one by one into elements of `commandlineArguments` array. For example `-v 1` should be added as two elements, one element containing `-v` and one containing `1`, not a single one containing both parts.
-
-The included `OpenSeeIKTarget` component can be used in conjunction with FinalIK or other IK solutions to animate head motion.
-
-## Expression detection
-
-The `OpenSeeExpression` component can be added to the same component as the `OpenSeeFace` component to detect specific facial expressions. It has to be calibrated on a per-user basis. It can be controlled either through the checkboxes in the Unity Editor or through the equivalent public methods that can be found in its source code.
-
-To calibrate this system, you have to gather example data for each expression. If the capture process is going too fast, you can use the `recordingSkip` option to slow it down.
-
-The general process is as follows:
-
-* Type in a name for the expression you want to calibrate.
-* Make the expression and hold it, then tick the recording box.
-* Keep holding the expression and move your head around and turn it in various directions.
-* After a short while, start talking while doing so if the expression should be compatible with talking.
-* After doing this for a while, untick the recording box and work on capturing another expression.
-* Tick the train box and see if the expressions you gathered data for are detected accurately.
-* You should also get some statistics in the lower part of the component.
-* If there are issues with any expression being detected, keep adding data to it.
-
-To delete the captured data for an expression, type in its name and tick the "Clear" box.
-
-To save both the trained model and the captured training data, type in a filename including its full path in the "Filename" field and tick the "Save" box. To load it, enter the filename and tick the "Load" box.
-
-### Hints
-
-* A reasonable number of expressions is six, including the neutral one.
-* Before starting to capture expressions, make some faces and wiggle your eyebrows around, to warm up the feature detection part of the tracker.
-* Once you have a detection model that works decently, when using it take a moment to check all the expressions work as intended and add a little data if not.
-
-# General notes
-
-* The tracking seems to be quite robust even with partial occlusion of the face, glasses or bad lighting conditions.
-* The highest quality model is selected with `--model 3`, the fastest model with the lowest tracking quality is `--model 0`.
-* Lower tracking quality mainly means more rigid tracking, making it harder to detect blinking and eyebrow motion.
-* Depending on the frame rate, face tracking can easily use up a whole CPU core. At 30fps for a single face, it should still use less than 100% of one core on a decent CPU. If tracking uses too much CPU, try lowering the frame rate. A frame rate of 20 is probably fine and anything above 30 should rarely be necessary.
-* When setting the number of faces to track to a higher number than the number of faces actually in view, the face detection model will run every `--scan-every` frames. This can slow things down, so try to set `--faces` no higher than the actual number of faces you are tracking.
-
-# Models
-
-Four pretrained face landmark models are included. Using the `--model` switch, it is possible to select them for tracking. The given fps values are for running the model on a single face video on a single CPU core. Lowering the frame rate would reduce CPU usage by a corresponding degree.
-
-* Model **-1**: This model is for running on toasters, so it's a very very fast and very low accuracy model. (213fps without gaze tracking)
-* Model **0**: This is a very fast, low accuracy model. (68fps)
-* Model **1**: This is a slightly slower model with better accuracy. (59fps)
-* Model **2**: This is a slower model with good accuracy. (50fps)
-* Model **3** (default): This is the slowest and highest accuracy model. (44fps)
-
-FPS measurements are from running on one core of my CPU.
-
-Pytorch weights for use with `model.py` can be found [here](https://mega.nz/file/vvYXlYQT#h7FpEg4tmOCJNxjpsDEw0JomJIkVGKwrt4OUV0RNDDU). Some unoptimized ONNX models can be found [here](https://github.com/emilianavt/OpenSeeFace/issues/48).
-
-# Results
-
-## Landmarks
-
-![Results1.png](https://raw.githubusercontent.com/emilianavt/OpenSeeFace/master/Images/Results1.png)
-
-![Results2.png](https://raw.githubusercontent.com/emilianavt/OpenSeeFace/master/Images/Results2.png)
-
-More samples: [Results3.png](https://raw.githubusercontent.com/emilianavt/OpenSeeFace/master/Images/Results3.png), [Results4.png](https://raw.githubusercontent.com/emilianavt/OpenSeeFace/master/Images/Results4.png)
-
-## Face detection
-
-The landmark model is quite robust with respect to the size and orientation of the faces, so the custom face detection model gets away with rougher bounding boxes than other approaches. It has a favorable speed to accuracy ratio for the purposes of this project.
-
-![EmiFace.png](https://raw.githubusercontent.com/emilianavt/OpenSeeFace/master/Images/EmiFace.png)
-
-# Release builds
-
-The builds in the release section of this repository contain a `facetracker.exe` inside a `Binary` folder that was built using `pyinstaller` and contains all required dependencies.
-
-To run it, at least the `models` folder has to be placed in the same folder as `facetracker.exe`. Placing it in a common parent folder should work too.
-
-When distributing it, you should also distribute the `Licenses` folder along with it to make sure you conform to requirements set forth by some of the third party libraries. Unused models can be removed from redistributed packages without issue.
-
-The release builds contain a custom build of ONNX Runtime without telemetry.
-
-# Dependencies (Python 3.6 - 3.9)
-
-* ONNX Runtime
-* OpenCV
-* Pillow
-* Numpy
-
-The required libraries can be installed using pip:
-
-     pip install onnxruntime opencv-python pillow numpy
-
-Alternatively poetry can be used to 
-install all dependencies for this project in a separate virtual env:
-
-     poetry install
-
-# Dependencies
-
-* onnxruntime
-* OpenCV
-* Pillow
-* Numpy
-
-The required libraries can be installed using pip:
- 
-	pip install onnxruntime opencv-python pillow numpy
-
-# References
-
-## Training dataset
-
-The model was trained on a 66 point version of the [LS3D-W](https://www.adrianbulat.com/face-alignment) dataset.
-
-    @inproceedings{bulat2017far,
-      title={How far are we from solving the 2D \& 3D Face Alignment problem? (and a dataset of 230,000 3D facial landmarks)},
-      author={Bulat, Adrian and Tzimiropoulos, Georgios},
-      booktitle={International Conference on Computer Vision},
-      year={2017}
-    }
-
-Additional training has been done on the WFLW dataset after reducing it to 66 points and replacing the contour points and tip of the nose with points predicted by the model trained up to this point. This additional training is done to improve fitting to eyes and eyebrows.
-
-    @inproceedings{wayne2018lab,
-      author = {Wu, Wayne and Qian, Chen and Yang, Shuo and Wang, Quan and Cai, Yici and Zhou, Qiang},
-      title = {Look at Boundary: A Boundary-Aware Face Alignment Algorithm},
-      booktitle = {CVPR},
-      month = June,
-      year = {2018}
-    }
-
-For the training the gaze and blink detection model, the [MPIIGaze](https://www.mpi-inf.mpg.de/departments/computer-vision-and-machine-learning/research/gaze-based-human-computer-interaction/appearance-based-gaze-estimation-in-the-wild/) dataset was used. Additionally, around 125000 synthetic eyes generated with [UnityEyes](https://www.cl.cam.ac.uk/research/rainbow/projects/unityeyes/) were used during training.
-
-It should be noted that additional custom data was also used during the training process and that the reference landmarks from the original datasets have been modified in certain ways to address various issues. It is likely not possible to reproduce these models with just the original LS3D-W and WFLW datasets, however the additional data is not redistributable.
-
-The heatmap regression based face detection model was trained on random 224x224 crops from the WIDER FACE dataset.
-
-	@inproceedings{yang2016wider,
-	  Author = {Yang, Shuo and Luo, Ping and Loy, Chen Change and Tang, Xiaoou},
-	  Booktitle = {IEEE Conference on Computer Vision and Pattern Recognition (CVPR)},
-	  Title = {WIDER FACE: A Face Detection Benchmark},
-	  Year = {2016}
-    }
-
-## Algorithm
-
-The algorithm is inspired by:
-
-* [Designing Neural Network Architectures for Different Applications: From Facial Landmark Tracking to Lane Departure Warning System](https://www.synopsys.com/designware-ip/technical-bulletin/ulsee-designing-neural-network.html) by YiTa Wu, Vice President of Engineering, ULSee
-* [Real-time Human Pose Estimation in the Browser with TensorFlow.js](https://blog.tensorflow.org/2018/05/real-time-human-pose-estimation-in.html)
-* [U-Net: Convolutional Networks for Biomedical Image Segmentation](https://lmb.informatik.uni-freiburg.de/people/ronneber/u-net/) by Olaf Ronneberger, Philipp Fischer, Thomas Brox
-* [MobileNets: Efficient Convolutional Neural Networks for Mobile Vision Applications](https://arxiv.org/abs/1704.04861) by Andrew G. Howard, Menglong Zhu, Bo Chen, Dmitry Kalenichenko, Weijun Wang, Tobias Weyand, Marco Andreetto, Hartwig Adam
-* [Searching for MobileNetV3](https://arxiv.org/abs/1905.02244) by Andrew Howard, Mark Sandler, Grace Chu, Liang-Chieh Chen, Bo Chen, Mingxing Tan, Weijun Wang, Yukun Zhu, Ruoming Pang, Vijay Vasudevan, Quoc V. Le, Hartwig Adam
-
-The MobileNetV3 code was taken from [here](https://github.com/rwightman/gen-efficientnet-pytorch).
-
-For all training a modified version of [Adaptive Wing Loss](https://github.com/tankrant/Adaptive-Wing-Loss) was used.
-
-* [Adaptive Wing Loss for Robust Face Alignment via Heatmap Regression](https://arxiv.org/abs/1904.07399) by Xinyao Wang, Liefeng Bo, Li Fuxin
-
-For expression detection, [LIBSVM](https://www.csie.ntu.edu.tw/~cjlin/libsvm/) is used.
-
-Face detection is done using a custom heatmap regression based face detection model or RetinaFace.
-
-    @inproceedings{deng2019retinaface,
-      title={RetinaFace: Single-stage Dense Face Localisation in the Wild},
-      author={Deng, Jiankang and Guo, Jia and Yuxiang, Zhou and Jinke Yu and Irene Kotsia and Zafeiriou, Stefanos},
-      booktitle={arxiv},
-      year={2019}
-    }
-
-RetinaFace detection is based on [this](https://github.com/biubug6/Pytorch_Retinaface) implementation. The pretrained model was modified to remove unnecessary landmark detection and converted to ONNX format for a resolution of 640x640.
+### 4. 注意事项
+
+- `ip.txt` 使用 `key=value` 格式，`ip=` 和 `port=` 的值必须与 OpenSeeFace 的 `-i` / `-p` 参数一致
+- 默认值 `127.0.0.1` / `11573`（本地回环），无需修改
+- 如果 VTube Studio 在 OpenSeeFace 之后启动，可能需要**重启 VTube Studio**才能识别 `ip.txt` 的变更
+- 两台机器之间传输：将追踪机器的 `ip.txt` 中 `ip=` 设为局域网 IP（如 `192.168.1.100`），并在 OpenSeeFace 启动时指定 `-i 0.0.0.0` 以允许外部连接
+
+```bash
+# ip.txt 示例（跨机器）
+ip=192.168.1.100
+port=11573
+```
+
+```bash
+# OpenSeeFace 允许外部连接
+python facetracker.py -i 0.0.0.0 -p 11573 --model 2 --try-hard 1
+```
+
+> **提示**：如果 VTube Studio 显示 "未连接"，请检查：① `ip.txt` 格式和内容是否正确（`key=value` 每行一对）；② OpenSeeFace 是否正在运行；③ 防火墙是否阻止了 UDP 端口。
 
 ---
 
-# Performance Optimizations
+## 启动脚本
 
-This fork includes a series of performance optimizations that improve tracking speed while maintaining full backward compatibility (same CLI, same UDP binary format).
+本项目提供了一个交互式启动脚本 `start_opensseface.sh`，可以引导您配置所有参数并以后台进程方式运行。
 
-See the full [Optimization Report](Docs/OPTIMIZATION_REPORT.md) for detailed explanations.
+```bash
+./start_opensseface.sh            # 首次运行：交互式配置向导
+./start_opensseface.sh            # 后续运行：直接使用已保存配置静默启动
+./start_opensseface.sh reconfig   # 强制重新配置
+./start_opensseface.sh --help     # 显示帮助
+```
 
-## GPU Acceleration (CUDA)
+### 自动环境初始化
 
-OpenSeeFace supports **NVIDIA GPU acceleration** via onnxruntime-gpu + CUDA 12.x.
+脚本**自动使用 `uv` 创建虚拟环境**（如果不存在），并安装所有必需的依赖。
 
-| Model | CPU FPS (single-core) | **GPU FPS (GTX 1660 Ti)** | Speedup |
+依赖通过 `pyproject.toml` 中的 extras 声明：
+
+```bash
+uv pip install -e ".[cpu]"   # CPU 版（onnxruntime）
+uv pip install -e ".[gpu]"   # GPU 加速版（onnxruntime-gpu + CUDA 12.x）
+```
+
+首次运行时，脚本**自动检测 NVIDIA GPU**：
+- **检测到 GPU** → 安装 `.[gpu]` extra（CUDA 加速）
+- **未检测到**   → 安装 `.[cpu]` extra（CPU 推理）
+
+无需手动执行 `pip install`，直接运行脚本即可。
+
+### 配置持久化
+
+首次运行后，所有参数自动保存在 `.facetracker_config` 文件中。后续运行时**跳过交互式问答直接启动**，无需每次手动配置。如需更改配置，运行 `reconfig` 子命令重新进入配置向导。
+
+脚本启动前还会自动终止所有残留的 `facetracker.py` 进程，确保每次重启干净。
+
+### 交互式配置项
+
+| 配置步骤 | 说明 |
+|---|---|
+| **运行模式** | 摄像头、视频文件、Benchmark 测试 |
+| **摄像头设置** | 设备编号、分辨率、帧率、是否镜像 |
+| **质量预设** | 5 种预设 + 自定义（见下方表格） |
+| **多人脸设置** | 最大追踪人脸数（1~4） |
+| **UDP 输出** | 发送目标 IP 和端口 |
+| **日志选项** | 是否记录追踪数据和控制台输出 |
+| **线程数** | 根据 CPU 核心数调整 |
+
+### 质量预设速查
+
+| 预设 | 模型 | 检测阈值 | 追踪阈值 | 3D自适应 | Gaze追踪 | 适用场景 |
+|---|---|---|---|---|---|---|
+| 🚀 **极致性能** | -1 | 0.4 | 0.6 | 关闭 | 关闭 | 低配设备/对延迟极度敏感 |
+| ⚡ **快速** | 0 | 0.5 | 0.7 | 关闭 | 关闭 | 平衡速度与质量 |
+| 🎯 **均衡（默认）** | 2 | 0.6 | 0.8 | 关闭 | 开启 | 大多数场景推荐 |
+| ✨ **高质量** | 3 | 0.6 | 0.85 | 开启 | 开启 | 追求最佳追踪精度 |
+| 😉 **眨眼优化** | 4 | 0.6 | 0.8 | 关闭 | 开启 | 对眨眼检测有特殊需求 |
+
+### 后台管理
+
+启动脚本使用 `nohup` 在后台运行追踪程序，并自动管理：
+
+```bash
+# 查看实时日志
+tail -f .facetracker_console.log
+
+# 停止追踪
+./start_opensseface.sh stop
+# 或手动: kill $(cat .facetracker.pid) 2>/dev/null || rm -f .facetracker.pid
+
+# 检查是否运行中
+ps aux | grep facetracker
+```
+
+---
+
+## 手动运行
+
+```bash
+# 基本用法（默认摄像头 + 均衡预设）
+python facetracker.py
+
+# 完整参数示例
+python facetracker.py \
+  -c 0 \                         # 摄像头编号
+  -F 30 \                        # 帧率
+  -W 640 -H 480 \                # 分辨率
+  --model 3 \                    # 模型质量
+  --try-hard 1 \                 # 尽力找脸
+  --gaze-tracking 1 \            # 眼球追踪
+  --no-3d-adapt 0 \              # 3D自适应
+  --detection-threshold 0.6 \    # 检测阈值
+  --threshold 0.8 \              # 追踪阈值
+  --max-threads 4 \              # 线程数
+  -i 127.0.0.1 -p 11573 \        # UDP 目标
+  --visualize 1 \                # 可视化显示
+  --faces 1 \                    # 最大人脸数
+  -M \                           # 镜像模式
+  -c video.mp4 \                 # 视频文件
+  --repeat-video 1               # 视频循环
+```
+
+### 可视化模式
+
+```
+--visualize 0   不显示画面（默认，节省资源）
+--visualize 1   显示追踪画面
+--visualize 2   显示面部 ID
+--visualize 3   显示置信度数值
+--visualize 4   显示地标点编号
+```
+
+---
+
+## 参数说明
+
+### 核心参数
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `-c, --capture` | `0` | 摄像头编号或视频文件路径 |
+| `-W, --width` | `640` | 画面宽度 |
+| `-H, --height` | `360` | 画面高度 |
+| `-F, --fps` | `24` | 帧率 |
+| `-M, --mirror-input` | 关 | 镜像画面 |
+
+### 追踪参数
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--model` | `3` | 模型质量 (-3~4) |
+| `--detection-threshold` | `0.6` | 人脸检测阈值，越低越灵敏 |
+| `--threshold` | 自动 | 追踪置信度阈值，越低越易追踪 |
+| `--no-3d-adapt` | `1` | 关闭 3D 自适应（关闭更快） |
+| `--try-hard` | `0` | 尽力找脸模式 |
+| `--gaze-tracking` | `1` | 眼球追踪 |
+| `--faces` | `1` | 最大追踪人脸数，越多人脸越慢 |
+| `--scan-every` | `3` | 多人脸时每隔多少帧扫描一次 |
+
+### 性能参数
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--max-threads` | `1` | 最大线程数，建议设为 CPU 核心数 |
+| `--silent` | `0` | 静默模式，关闭控制台输出 |
+
+### 输出参数
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `-i, --ip` | `127.0.0.1` | UDP 发送地址 |
+| `-p, --port` | `11573` | UDP 发送端口 |
+| `--log-data` | 空 | 追踪数据日志文件 |
+| `--log-output` | 空 | 控制台输出日志文件 |
+| `--video-out` | 空 | 保存追踪可视化视频 |
+
+---
+
+## 模型选择
+
+| 模型 | 质量 | 速度 | 说明 |
 |---|---|---|---|
-| 3 (high quality) | 125 | **210** | **×1.68** |
+| **-3** | 极低 | 极快 | 介于 0 和 -1 之间 |
+| **-2** | 低 | 很快 | 等效于模型 1 |
+| **-1** | 很低 | 最快 | 56×56 输入，极低精度高灵敏度 |
+| **0** | 低 | 快 | 适合低配设备 |
+| **1** | 中 | 中 | 偏刚性，眨眼检测较弱 |
+| **2** | 良好 | 中 | 推荐的平衡选择 |
+| **3** (默认) | 最高 | 较慢 | 最佳追踪精度 |
+| **4** | 高 | 较慢 | 眨眼检测优化 |
+
+> **速度参考**（单核，单脸）：模型 -1 ~213 FPS，模型 3 ~44 FPS
+
+---
+
+## GPU 加速 (CUDA)
+
+OpenSeeFace 支持 **NVIDIA GPU 加速**，通过 onnxruntime-gpu + CUDA 12.x 实现显著性能提升。
+
+| 模型 | CPU FPS | **GPU FPS (GTX 1660 Ti)** | 加速比 |
+|---|---|---|---|
+| 3 (高质量) | 125 | **210** | **×1.68** |
 | 2 | 133 | **231** | **×1.74** |
 | 1 | 169 | **278** | **×1.65** |
 | 0 | 142 | **288** | **×2.03** |
-| -1 (fastest) | 299 | **512** | **×1.71** |
+| -1 (极速) | 299 | **512** | **×1.71** |
 | -2 | 176 | **294** | **×1.67** |
 | -3 | 236 | **330** | **×1.40** |
 
-### Automatic GPU Setup
+### 自动 GPU 配置
 
-The startup script **auto-detects NVIDIA GPU** and installs the correct dependencies:
-- **GPU detected** → `uv pip install -e ".[gpu]"` (onnxruntime-gpu + CUDA 12.x runtime)
-- **No GPU** → `uv pip install -e ".[cpu]"` (onnxruntime, CPU-only)
+启动脚本**自动检测 NVIDIA GPU** 并安装对应依赖：
+- **检测到 GPU** → `uv pip install -e ".[gpu]"`（onnxruntime-gpu + CUDA 12.x 运行时）
+- **未检测到**   → `uv pip install -e ".[cpu]"`（onnxruntime，纯 CPU）
 
-All GPU dependencies are declared as a `[gpu]` extra in `pyproject.toml`:
+所有 GPU 依赖在 `pyproject.toml` 中以 `[gpu]` extra 声明：
 ```toml
 [tool.poetry.extras]
 cpu = ["onnxruntime"]
@@ -346,66 +289,64 @@ gpu = ["onnxruntime-gpu", "nvidia-cublas-cu12",
        "nvidia-cuda-runtime-cu12", "nvidia-cufft-cu12"]
 ```
 
-Manual installation (if needed):
+手动安装（如需要）：
 ```bash
-uv pip install -e ".[gpu]"   # GPU-accelerated
-uv pip install -e ".[cpu]"   # CPU-only
+uv pip install -e ".[gpu]"   # GPU 加速版
+uv pip install -e ".[cpu]"   # CPU 版
 ```
 
-### How It Works
+### 工作原理
 
-1. **Auto-detection**: onnxruntime-gpu reports `CUDAExecutionProvider` availability
-2. **Model switching**: Tracker automatically selects `_gpu.onnx` model files (with `FusedConv` ops decomposed into `Conv + activation`)
-3. **Provider priority**: `CUDAExecutionProvider` → `CPUExecutionProvider` fallback
-4. **No GPU**: automatically falls back to CPU `_opt.onnx` models
+1. **自动检测**：onnxruntime-gpu 报告 `CUDAExecutionProvider` 可用性
+2. **模型切换**：Tracker 自动选择 `_gpu.onnx` 模型文件（`FusedConv` 已分解为 `Conv + 激活函数`）
+3. **优先级**：`CUDAExecutionProvider` → `CPUExecutionProvider`（自动回退）
+4. **无 GPU 环境**：自动使用 CPU `_opt.onnx` 模型，行为不变
 
-The startup script `./start_opensseface.sh` automatically sets up the CUDA runtime path.
+启动脚本 `./start_opensseface.sh` 会自动设置 CUDA 运行时路径。
 
-## Quick Start
+## 性能优化
 
-```bash
-./start_opensseface.sh          # Interactive startup script (recommended)
-```
+本项目已应用多项性能优化，详情见 [优化报告](Docs/OPTIMIZATION_REPORT.md)。
 
-Or run directly:
+| 优化项 | 作用 |
+|---|---|
+| **人脸检测自适应退避** | 无人脸时自动降频，从每帧检测降到每3帧、每10帧一次 |
+| **Gaze 模型按需跳过** | `--gaze-tracking 0` 时完全跳过眼球追踪计算 |
+| **adjust_3d 间隔控制** | 可配置 `adjust_3d()` 执行间隔，降低 CPU 占用 |
+| **低置信度跳过 3D 拟合** | 置信度 ≤ 0.3 时跳过耗时 3D 求解 |
+| **UDP 批量打包** | 18 次 struct.pack 合并为 5 次，减少 Python 调用开销 |
+| **GC 降频** | 从每帧 GC 改为每 30 帧 GC，减少卡顿 |
+| **🚀 GPU 加速** | 集成 CUDA 12.x，**1.4x–2.0x** FPS 提升 |
 
-```bash
-python facetracker.py --model 2 --try-hard 1 --max-threads 4 --visualize 1
-```
-
-## Optimizations Summary
-
-| # | Optimization | File | Benefit |
-|---|---|---|---|
-| 1 | `group_rects` str → tuple keys | `tracker.py` | Less memory allocation per frame |
-| 2 | Skip gaze model when disabled | `tracker.py` | 2-5 ms/frame with `--gaze-tracking 0` |
-| 3 | Adaptive detection backoff | `tracker.py` | 70-90% fewer detections when no face |
-| 4 | Configurable `adjust_3d` interval | `tracker.py` | Reduce CPU via `adjust_3d_interval=N` |
-| 5 | Skip 3D fitting on low confidence | `tracker.py` | Skip `estimate_depth` when conf ≤ 0.3 |
-| 6 | Batch UDP struct packing | `facetracker.py` | 18 calls → 5, same binary output |
-| 7 | Remove redundant `bytearray()` | `facetracker.py` | Less intermediate allocation |
-| 8 | GC throttling + threshold tuning | `facetracker.py` | Fewer stop-the-world pauses |
-| 9 | **GPU (CUDA/TensorRT) acceleration** | `tracker.py`, models | **1.4x–2.0x FPS boost** on NVIDIA GPUs |
-
-**Backward compatibility verified**: UDP packets byte-identical, all CLI params unchanged, all class public interfaces preserved.
+所有优化保持 **API 完全向后兼容**，UDP 二进制格式逐字节一致。
 
 ---
 
-# Thanks!
+## 常见问题
 
-Many thanks to everyone who helped me test things!
+**Q: 找不到摄像头？**  
+A: 检查 `-c` 参数是否正确。Linux 下可使用 `v4l2-ctl --list-devices` 查看设备列表。
 
-* [@Virtual_Deat](https://twitter.com/Virtual_Deat), who also inspired me to start working on this.
-* [@ENiwatori](https://twitter.com/eniwatori) and family.
-* [@ArgamaWitch](https://twitter.com/ArgamaWitch)
-* [@AngelVayuu](https://twitter.com/AngelVayuu)
-* [@DapperlyYours](https://twitter.com/DapperlyYours)
-* [@comdost_art](https://twitter.com/comdost_art)
-* [@Ponoki_Chan](https://twitter.com/Ponoki_Chan)
+**Q: 帧率太低 / CPU 占用太高？**  
+A: 尝试更低质量的模型（`--model -1` 或 `--model 0`），降低帧率（`-F 20`），或增加线程数（`--max-threads 4`）。
 
-# License
+**Q: 检测不到人脸？**  
+A: 尝试开启 `--try-hard 1`，降低 `--detection-threshold`（如 0.4），或者关闭 `--no-3d-adapt 1`。
 
-The code and models are distributed under the BSD 2-clause license. 
+**Q: 如何测试模型性能？**  
+A: 运行 `python facetracker.py --benchmark 1` 或使用启动脚本的 Benchmark 模式。
 
-You can find licenses of third party libraries used for binary builds in the `Licenses` folder.
+**Q: 如何在 Unity 中使用？**  
+A: 参考 `Unity/` 目录下的 `OpenSee` 组件和 `Examples/` 目录中的示例。
 
+---
+
+## 相关链接
+
+- [原项目 GitHub](https://github.com/emilianavt/OpenSeeFace)
+- [VSeeFace (3D模型驱动)](https://www.vseeface.icu/)
+- [VTube Studio (Live2D驱动)](https://denchisoft.com/)
+
+## 许可
+
+本项目基于 BSD 2-Clause 许可协议发布。第三方库的许可见 `Licenses/` 目录。
